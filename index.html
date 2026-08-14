@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pico Intervalometer</title>
+  <style>
+    :root{--accent:#0366d6}
+    body{font-family:system-ui,Segoe UI,Arial;margin:18px;color:#111}
+    h1{font-size:1.2rem;margin-bottom:8px}
+    .row{display:flex;gap:12px;align-items:center}
+    label{display:block;margin-top:8px}
+    input[type=number]{width:140px;padding:6px}
+    button{margin-top:10px;padding:8px 12px;border-radius:6px;border:1px solid #ccc;background:#fff}
+    #connect{background:var(--accent);color:#fff;border:none}
+    .status{margin-top:12px;font-weight:600}
+    .box{border:1px solid #e6e6e6;padding:12px;border-radius:8px;max-width:420px}
+    .log{font-family:monospace;font-size:.9rem;margin-top:8px;max-height:140px;overflow:auto;background:#fafafa;padding:8px;border-radius:6px}
+  </style>
+</head>
+<body>
+  <h1>Pico Intervalometer (Web Bluetooth)</h1>
+  <div class="box">
+    <div class="row">
+      <button id="connect">Connect</button>
+      <button id="disconnect" style="display:none">Disconnect</button>
+      <div id="deviceName">No device</div>
+    </div>
+
+    <div id="controls" style="display:none">
+      <label>Interval (ms): <input id="interval" type="number" min="1000" step="100" value="500"></label>
+      <label>Delay (ms): <input id="delay" type="number" min="0" step="50" value="50"></label>
+      <label>Enable: <input id="enable" type="checkbox"></label>
+      <div class="row"><button id="read">Refresh values</button></div>
+    </div>
+
+    <div class="status" id="status">Not connected</div>
+    <div class="log" id="log"></div>
+  </div>
+
+  <script>
+    const SERVICE = 'fa2c6001-1203-4806-af25-075a06539f45';
+    const CHAR_ENABLE = 'fa2c6002-1203-4806-af25-075a06539f45';
+    const CHAR_INTERVAL = 'fa2c6003-1203-4806-af25-075a06539f45';
+    const CHAR_DELAY = 'fa2c6004-1203-4806-af25-075a06539f45';
+
+    let device, server, service;
+    let cEnable, cInterval, cDelay;
+
+    const btnConnect = document.getElementById('connect');
+    const btnDisconnect = document.getElementById('disconnect');
+    const controls = document.getElementById('controls');
+    const status = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const deviceName = document.getElementById('deviceName');
+    const inpInterval = document.getElementById('interval');
+    const inpDelay = document.getElementById('delay');
+    const chkEnable = document.getElementById('enable');
+    const btnRead = document.getElementById('read');
+
+    function show(s){ status.textContent = s; addLog(s) }
+    function addLog(s){ const el=document.createElement('div'); el.textContent = s; logEl.prepend(el) }
+
+    async function connect(){
+      try{
+        device = await navigator.bluetooth.requestDevice({filters:[{services:[SERVICE]}]});
+        device.addEventListener('gattserverdisconnected', onDisconnect);
+        deviceName.textContent = device.name || 'Unnamed device';
+
+        server = await device.gatt.connect();
+        service = await server.getPrimaryService(SERVICE);
+
+        cEnable = await service.getCharacteristic(CHAR_ENABLE);
+        cInterval = await service.getCharacteristic(CHAR_INTERVAL);
+        cDelay = await service.getCharacteristic(CHAR_DELAY);
+
+        controls.style.display = '';
+        btnDisconnect.style.display = '';
+        btnConnect.style.display = 'none';
+
+        show('Connected to ' + (device.name||'device'));
+
+        await readAll();
+
+        // Try to receive notifications when values change on device
+        try{
+          await cEnable.startNotifications();
+          cEnable.addEventListener('characteristicvaluechanged', (e)=>{
+            const v=new DataView(e.target.value.buffer).getUint8(0); chkEnable.checked=!!v; addLog('Enable changed -> '+v)
+          });
+        }catch(e){ /* not fatal */ }
+
+        chkEnable.addEventListener('change', async ()=>{
+          const val = chkEnable.checked?1:0;
+          await cEnable.writeValue(new Uint8Array([val]));
+          addLog('Wrote enable='+val);
+        });
+
+        inpInterval.addEventListener('change', async ()=>{
+          const v = parseInt(inpInterval.value)||0;
+          const buf = new ArrayBuffer(4); new DataView(buf).setUint32(0,v,true);
+          await cInterval.writeValue(new Uint8Array(buf));
+          addLog('Wrote interval='+v);
+        });
+
+        inpDelay.addEventListener('change', async ()=>{
+          const v = parseInt(inpDelay.value)||0;
+          const buf = new ArrayBuffer(4); new DataView(buf).setUint32(0,v,true);
+          await cDelay.writeValue(new Uint8Array(buf));
+          addLog('Wrote delay='+v);
+        });
+
+        btnRead.addEventListener('click', readAll);
+
+      }catch(e){ show('Error: '+e); console.error(e) }
+    }
+
+    async function readAll(){
+      try{
+        const e = await cEnable.readValue();
+        const en = e.getUint8(0); chkEnable.checked = !!en;
+
+        const iv = await cInterval.readValue();
+        const interval = new DataView(iv.buffer).getUint32(0,true); inpInterval.value = interval;
+
+        const dv = await cDelay.readValue();
+        const delay = new DataView(dv.buffer).getUint32(0,true); inpDelay.value = delay;
+
+        show('Values refreshed');
+      }catch(err){ show('Read error: '+err); console.error(err) }
+    }
+
+    function onDisconnect(){
+      show('Disconnected');
+      controls.style.display = 'none';
+      btnDisconnect.style.display = 'none';
+      btnConnect.style.display = '';
+      deviceName.textContent = 'No device';
+    }
+
+    btnConnect.addEventListener('click', ()=>{
+      if(!navigator.bluetooth){ show('Web Bluetooth not available'); return }
+      connect();
+    });
+
+    btnDisconnect.addEventListener('click', async ()=>{
+      if(device && device.gatt && device.gatt.connected) await device.gatt.disconnect();
+      onDisconnect();
+    });
+  </script>
+</body>
+</html>
